@@ -1,0 +1,4 @@
+# satu link vless:// per baris. baris # = komentar.
+# port mulai dari --base (default 1081), naik 1 tiap baris valid.
+vless://11111111-2222-3333-4444-555555555555@host1.example.com:443?encryption=none&security=tls&sni=host1.example.com&type=ws&host=host1.example.com&path=%2Fws#cfvpn-1
+vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@host2.example.com:443?encryption=none&security=reality&pbk=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX&sid=abcd&fp=chrome&type=tcp&flow=xtls-rprx-vision#cfvpn-2

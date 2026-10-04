@@ -1,0 +1,6 @@
+accounts.txt
+config.json
+*.tunnel.yml
+webui.login
+webui.settings.json
+xray.log

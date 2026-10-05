@@ -54,6 +54,24 @@ TUNNEL = SET["tunnel"]
 TUNNELID = SET["tunnel_id"]
 XRAYBIN = SET["xray_path"] or XRAY
 
+def _find_xray():
+    """Auto-scan xray: settings path -> HERE/xray(.exe) -> PATH. Mirrors cf.py."""
+    import shutil
+    cands = []
+    if SET.get("xray_path"):
+        cands.append(SET["xray_path"])
+    cands.append(os.path.join(HERE, "xray.exe" if os.name == "nt" else "xray"))
+    keep = SET.get("xray_path")
+    for c in cands:
+        if os.path.isfile(c):
+            return c
+    return keep or shutil.which("xray") or XRAY
+
+def _resolved_xray():
+    global XRAYBIN
+    XRAYBIN = _find_xray()
+    return XRAYBIN
+
 def save_set(d):
     global SET, BASE, AUTH, TUNNEL, TUNNELID, XRAYBIN
     SET = d
@@ -97,11 +115,11 @@ def xray_start():
         return "config.json belum ada - klik Regenerate dulu"
     log = open(LOGF, "ab")
     try:
-        proc = subprocess.Popen([XRAYBIN, "run", "-c", CFG], stdout=log, stderr=log)
+        proc = subprocess.Popen([_resolved_xray(), "run", "-c", CFG], stdout=log, stderr=log)
         return f"xray start (pid {proc.pid})"
     except FileNotFoundError:
         proc = None
-        return f"xray binary tidak ketemu: {XRAYBIN} (atur di Pengaturan)"
+        return f"xray binary tidak ketemu: {_find_xray()} (atur di Pengaturan)"
 
 def xray_stop():
     global proc

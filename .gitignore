@@ -1,4 +1,5 @@
 accounts.txt
+.env
 config.json
 *.tunnel.yml
 webui.login

@@ -15,6 +15,7 @@
 #    VLESSBANK_AUTH         user:pass proxy     (wajib kalau listen=0.0.0.0)
 #    VLESSBANK_FORCE        overwrite settings  (default: 0)
 #    VLESSBANK_SKIP_BINS    skip download bin   (default: 0)
+#    VLESSBANK_START        auto-start webui    (default: 1, 0 = skip)
 # ============================================================================
 set -euo pipefail
 
@@ -30,6 +31,7 @@ LISTEN="${VLESSBANK_LISTEN:-127.0.0.1}"
 AUTH="${VLESSBANK_AUTH:-}"
 FORCE="${VLESSBANK_FORCE:-0}"
 SKIP_BINS="${VLESSBANK_SKIP_BINS:-0}"
+START="${VLESSBANK_START:-1}"
 
 # charge .env kalau ada (override default di atas)
 if [ -f "$APP_DIR/.env" ]; then
@@ -137,13 +139,33 @@ else
   warn "  cd $APP_DIR && python3 gen.py accounts.txt && python3 webui.py --port $WEBUI_PORT"
 fi
 
-# ---------- 6. summary ----------
+# ---------- 6. auto-start webui ----------
+if [ "$START" = "1" ]; then
+  if [ -s "$APP_DIR/accounts.txt" ]; then
+    say "  start webui :$WEBUI_PORT ..."
+    (cd "$APP_DIR" && nohup python3 webui.py --port "$WEBUI_PORT" > webui.log 2>&1 & echo $! > webui.pid)
+    for _ in $(seq 1 12); do
+      curl -fsS -o /dev/null "http://$LISTEN:$WEBUI_PORT/" 2>/dev/null && break
+      sleep 1
+    done
+    if curl -fsS -o /dev/null "http://$LISTEN:$WEBUI_PORT/" 2>/dev/null; then
+      ok "webui jalan: http://$LISTEN:$WEBUI_PORT/  (pid $(cat "$APP_DIR/webui.pid"))"
+    else
+      warn "webui gak sempat up -- check: tail -f $APP_DIR/webui.log"
+    fi
+  else
+    warn "accounts.txt kosong — tempel link vless:// lalu: python3 webui.py"
+  fi
+fi
+
+# ---------- 7. summary ----------
 URL="http://$LISTEN:$WEBUI_PORT/"
 say
 say "${BLD}========== VLESS-BANK SIAP ==========${NC}"
 say "  App      : $APP_DIR"
 say "  WebUI    : $URL"
 say "  Login    : admin / admin   (ganti di Pengaturan)"
+say "  Stop     : kill \$(cat $APP_DIR/webui.pid)"
 say "  Run      : cd $APP_DIR && python3 webui.py --port $WEBUI_PORT"
 say "  Binaries : $XRAY_BIN + $CF_BIN (auto-detect, no PATH setup)"
 say "${BLD}===================================${NC}"

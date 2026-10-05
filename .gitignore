@@ -5,6 +5,8 @@ config.json
 webui.login
 webui.settings.json
 xray.log
+webui.log
+webui.pid
 xray.exe
 cloudflared.exe
 *.zip

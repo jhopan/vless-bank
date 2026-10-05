@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from gen import build_outbound
+import cf as CF
 
 ACC = os.path.join(HERE, "accounts.txt")
 CFG = os.path.join(HERE, "config.json")
@@ -344,7 +345,7 @@ a{{color:#1a7f37;font-weight:600;text-decoration:none}}</style></head>
 </div></body></html>"""
 
 MENUS = [("dash", "/admin", "▤", "Dashboard"), ("log", "/admin/log", "☰", "Log"),
-         ("set", "/admin/settings", "⚙", "Pengaturan")]
+         ("cf", "/admin/cf", "☁", "Cloudflare"), ("set", "/admin/settings", "⚙", "Pengaturan")]
 
 def page(tab, msg="", body=None):
     run = xray_running()
@@ -515,6 +516,493 @@ def body_dash():
 <div class="card"><h2>Mode</h2><small>listen <code>{html.escape(SET["listen"])}</code>{auth}{tun}</small> -
 <a href="/settings">ubah di Pengaturan</a></div>"""
 
+def body_cf():
+    st  = CF.tunnel_status()
+    dl  = CF.dl_status()
+    pi  = CF.platform_info()
+    try:
+        dl_fname = CF._cf_fname()
+        dl_url   = CF._CF_CDN + dl_fname
+    except Exception:
+        dl_fname = dl_url = ""
+
+    tunnels = st["tunnels"]
+    cur_tid = SET.get("tunnel_id", "")
+
+    # rows tunnel — highlight yang aktif dipakai
+    def _trow(t):
+        tid  = t["id"]
+        nm   = html.escape(t["name"])
+        aktif = " ✓" if tid == cur_tid else ""
+        style = ' style="background:#f0fdf4"' if tid == cur_tid else ""
+        return (f'<tr{style}><td><code style="font-size:11px">{tid}</code></td>'
+                f'<td><b>{nm}</b>{aktif}</td>'
+                f'<td style="white-space:nowrap">'
+                f'<button class="sec" onclick="cfUseTunnel(\'{tid}\',\'{nm}\')">Pakai</button> '
+                f'<button class="del" onclick="cfDelTunnel(\'{tid}\',\'{nm}\')">Hapus</button>'
+                f'</td></tr>')
+    tun_rows = "".join(_trow(t) for t in tunnels) or \
+               '<tr><td colspan="3" class="empty">Belum ada tunnel</td></tr>'
+
+    # badges
+    if dl["state"] == "done":
+        bin_badge = f'<span class="badge paid">ADA · {html.escape(dl["version"])}</span>'
+    elif dl["state"] == "downloading":
+        bin_badge = f'<span class="badge pending">Mengunduh {dl["progress"]}%...</span>'
+    elif dl["state"] == "error":
+        bin_badge = f'<span class="badge expired">Error download</span>'
+    else:
+        bin_badge = '<span class="badge expired">BELUM ADA</span>'
+
+    login_st    = CF.login_status()
+    login_badge = ('<span class="badge paid">Proses login aktif</span>' if login_st["running"]
+                   else '<span class="badge pending">Belum login / siap login baru</span>')
+    tun_badge   = ('<span class="badge paid">RUNNING</span>' if st["running"]
+                   else '<span class="badge expired">MATI</span>')
+    yml_ok      = st["yml_ok"]
+
+    # preview yml jika ada
+    yml_preview_html = ""
+    if yml_ok:
+        pv = CF.yml_preview()
+        if pv["ok"]:
+            yml_preview_html = f'<pre style="margin-top:10px;max-height:180px">{html.escape(pv["content"])}</pre>'
+
+    log_html = html.escape(CF._tail_log(30)) or "(kosong)"
+
+    return f"""
+<div class="stats">
+<div class="stat"><div class="n" style="font-size:13px">{bin_badge}</div><div class="l">Binary</div></div>
+<div class="stat"><div class="n" style="font-size:13px">{login_badge}</div><div class="l">Login CF</div></div>
+<div class="stat"><div class="n" style="font-size:13px">{tun_badge}</div><div class="l">Tunnel</div></div>
+</div>
+<div id="cfmsg" class="flash" style="display:none"></div>
+
+<div class="card"><h2>1 · Binary cloudflared</h2>
+<div class="hint">Platform: <code>{html.escape(pi["os"])}</code> / <code>{html.escape(pi["arch"])}</code> &nbsp;·&nbsp; Lokasi: <code>{html.escape(pi["bin"])}</code></div>
+{'<div class="hint" style="color:#186a3b;margin-top:6px">cloudflared sudah ada · ' + html.escape(dl["version"]) + '</div>' if dl["state"]=="done" else '<p style="font-size:13px;margin-top:8px">cloudflared belum ada. Download otomatis atau manual.</p>'}
+<div class="btnrow" style="margin-top:8px">
+{'<button class="sec" onclick="cfDownload()">Download Otomatis</button>' if dl["state"] not in ("done","downloading") else ""}
+{'<div class="hint">Sedang mengunduh... <span id="dlpct">' + str(dl["progress"]) + '</span>%</div>' if dl["state"]=="downloading" else ""}
+{('<a href="' + html.escape(dl_url) + '" target="_blank"><button class="sec">Download Manual (' + html.escape(dl_fname) + ') ↗</button></a>') if dl_url and dl["state"] not in ("done","downloading") else ""}
+</div>
+{('<div class="hint" style="color:#b42318">Error: ' + html.escape(dl.get("error","")) + '<br>Download manual lalu taruh di: <code>' + html.escape(pi["bundle"]) + '</code></div>') if dl["state"]=="error" else ""}
+</div>
+
+<div class="card"><h2>2 · Login Cloudflare</h2>
+<p style="font-size:13px;color:#344054">Login ke akun Cloudflare kamu. Link login akan muncul di sini — klik, authorize di browser, lanjut ke step 3.</p>
+<div class="btnrow">
+<button onclick="cfLogin()" {'disabled' if not CF.bin_ok() else ''}>Login ke Cloudflare</button>
+{'<button class="sec" onclick="cfCancelLogin()">Batal</button>' if login_st["running"] else ""}
+</div>
+<div id="cfloginbox" style="margin-top:14px;display:{'block' if login_st['running'] else 'none'}">
+  <div style="background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;padding:14px">
+    <div style="font-size:13px;color:#344054;margin-bottom:8px"><b>Klik link berikut untuk login:</b></div>
+    <div id="cfloginurl" style="word-break:break-all;font-size:13px">
+      {'<a href="' + login_st["url"] + '" target="_blank" style="color:#1a7f37;font-weight:600">' + login_st["url"] + '</a>' if login_st["url"] else 'Menunggu URL...'}
+    </div>
+    <div style="font-size:12px;color:#667085;margin-top:8px">Setelah authorize di browser, status di sini akan update otomatis.</div>
+  </div>
+</div>
+{'<div class="hint" style="color:#186a3b;margin-top:8px">✓ Login berhasil — lanjut ke step 3</div>' if login_st["done"] else ""}
+</div>
+
+<div class="card"><h2>3 · Buat atau Pilih Tunnel</h2>
+<label>Nama tunnel baru</label>
+<div class="btnrow">
+<input id="tname" placeholder="vlessbank" style="width:220px">
+<button onclick="cfCreate()">Buat Tunnel</button>
+</div>
+<div style="margin-top:14px">
+<table><tr><th>Tunnel ID</th><th>Nama</th><th></th></tr>{tun_rows}</table>
+<button class="sec" style="margin-top:8px" onclick="cfRefreshTunnels()">↻ Refresh</button>
+</div></div>
+
+<div class="card"><h2>4 · Setup Domain & Generate Config</h2>
+<p style="font-size:13px;color:#344054">Masukkan CF API Token untuk load daftar domain, lalu pilih domain dan generate config tunnel.</p>
+<div class="hint" style="margin-bottom:10px">Buat token di <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" style="color:#1a7f37">CF dashboard → API Tokens</a> dengan permission <b>Zone:DNS:Edit</b>.</div>
+<div class="btnrow">
+<input id="cftoken" type="password" placeholder="CF API Token" style="width:320px">
+<button class="sec" onclick="cfLoadZones()">Load Domain</button>
+</div>
+<div id="zonebox" style="margin-top:12px;display:none">
+  <label>Pilih domain</label>
+  <select id="zoneSel" style="width:300px"><option value="">-- pilih --</option></select>
+  <label style="margin-top:10px">Subdomain prefix (default: socks)</label>
+  <input id="subdom" value="socks" style="width:140px">
+  <div class="hint">Wildcard CNAME yang akan dibuat: <code>*.socks.domain.com</code></div>
+  <div class="btnrow" style="margin-top:12px">
+    <button onclick="cfGenYml()">Generate config.tunnel.yml</button>
+    <button class="sec" onclick="cfCreateDNS()">Buat DNS Wildcard via API</button>
+  </div>
+</div>
+<div style="margin-top:10px">
+  <label>Atau isi manual:</label>
+  <div class="btnrow">
+    <input id="manDomain" placeholder="domain.com" style="width:220px" value="{html.escape(SET.get('tunnel',''))}">
+    <button class="sec" onclick="cfGenYmlManual()">Generate (manual)</button>
+  </div>
+</div>
+{yml_preview_html}
+</div>
+
+<div class="card"><h2>5 · DNS Wildcard</h2>
+<p style="font-size:13px;color:#344054">Satu CNAME wildcard cover semua akun sekarang dan nanti. Buat via tombol di step 4, atau manual:</p>
+{'<table><tr><th>Type</th><th>Name</th><th>Target</th><th>Proxy</th></tr><tr><td>CNAME</td><td><code>*.' + html.escape(SET.get("tunnel_id","?")) + '.cfargotunnel.com</code>... (isi setelah pilih domain)</td><td></td><td><b style="color:#b42318">OFF</b></td></tr></table>' if not SET.get("tunnel") else
+f'<table><tr><th>Type</th><th>Name</th><th>Target</th><th>Proxy</th></tr><tr><td>CNAME</td><td><code>*.socks.{html.escape(SET.get("tunnel",""))}</code></td><td><code>{html.escape(SET.get("tunnel_id","?"))}.cfargotunnel.com</code></td><td><b style="color:#b42318">OFF</b></td></tr></table>'}
+<div class="hint">Proxy <b>harus OFF</b> — raw TCP tidak bisa lewat CF HTTP proxy.</div>
+</div>
+
+<div class="card"><h2>6 · Jalankan Tunnel</h2>
+<p style="font-size:13px;color:#344054">
+config.tunnel.yml: {'<span style="color:#186a3b">✓ ada</span>' if yml_ok else '<b style="color:#b42318">belum ada — selesaikan step 4 dulu</b>'}
+</p>
+<div class="btnrow">
+<button onclick="cfTunnel('start')" {'disabled' if not yml_ok else ''}>▶ Start Tunnel</button>
+<button class="del" onclick="cfTunnel('stop')">■ Stop Tunnel</button>
+</div>
+<div style="margin-top:14px"><b style="font-size:13px">Log cloudflared:</b><pre id="cflog">{log_html}</pre></div>
+</div>
+
+<script>
+function cfMsg(s,ok){{
+  var m=document.getElementById('cfmsg');
+  m.textContent=s; m.style.display='block';
+  m.style.background=ok===false?'#fee4e2':ok===true?'#d4edda':'#fffbeb';
+  m.style.color=ok===false?'#b42318':ok===true?'#186a3b':'#8a6d00';
+}}
+function cfApi(path,data){{
+  return fetch(path,{{method:'POST',headers:authH(),body:data?new URLSearchParams(data).toString():''}})
+    .then(function(r){{if(r.status===401){{sessionStorage.removeItem('vbauth');location.href='/login';throw 'unauth';}}return r.json();}});
+}}
+function cfGet(path){{
+  return fetch(path,{{headers:{{'Authorization':sessionStorage.getItem('vbauth')||''}}}}).then(function(r){{return r.json();}});
+}}
+
+function cfDownload(){{
+  cfApi('/api/cf/download').then(function(){{
+    cfMsg('Mengunduh cloudflared...',null);
+    var iv=setInterval(function(){{
+      cfGet('/api/cf/dlstatus').then(function(s){{
+        if(s.state==='done'){{clearInterval(iv);cfMsg('Download selesai: '+s.version,true);location.reload();}}
+        else if(s.state==='error'){{clearInterval(iv);cfMsg('Error: '+s.error,false);}}
+        else{{var el=document.getElementById('dlpct');if(el)el.textContent=s.progress;}}
+      }});
+    }},1500);
+  }});
+}}
+
+var _loginIv=null;
+function cfLogin(){{
+  cfMsg('Memulai proses login...',null);
+  cfApi('/api/cf/login').then(function(j){{
+    if(!j.ok){{cfMsg('Error: '+j.error,false);return;}}
+    document.getElementById('cfloginbox').style.display='block';
+    if(j.url) _setLoginUrl(j.url);
+    if(j.done){{cfMsg('Login berhasil!',true);return;}}
+    if(_loginIv) clearInterval(_loginIv);
+    _loginIv=setInterval(function(){{
+      cfGet('/api/cf/loginstatus').then(function(s){{
+        if(s.url) _setLoginUrl(s.url);
+        if(s.done){{clearInterval(_loginIv);cfMsg('✓ Login berhasil! Lanjut ke step 3.',true);
+          setTimeout(function(){{location.reload();}},2000);}}
+        else if(!s.running){{clearInterval(_loginIv);}}
+      }});
+    }},2000);
+  }});
+}}
+function _setLoginUrl(url){{
+  var el=document.getElementById('cfloginurl');
+  if(el) el.innerHTML='<a href="'+url+'" target="_blank" style="color:#1a7f37;font-weight:600">'+url+'</a>';
+}}
+function cfCancelLogin(){{
+  if(_loginIv) clearInterval(_loginIv);
+  cfApi('/api/cf/cancelLogin').then(function(){{
+    cfMsg('Login dibatalkan',null); location.reload();
+  }});
+}}
+
+function cfCreate(){{
+  var nm=document.getElementById('tname').value.trim();
+  if(!nm){{cfMsg('Isi nama tunnel dulu',false);return;}}
+  cfMsg('Membuat tunnel "'+nm+'"...',null);
+  cfApi('/api/cf/create',{{name:nm}}).then(function(j){{
+    if(j.ok){{cfMsg('✓ Tunnel dibuat! ID: '+j.id,true);setTimeout(function(){{location.reload();}},1500);}}
+    else cfMsg('Error: '+j.error,false);
+  }});
+}}
+function cfRefreshTunnels(){{
+  cfApi('/api/cf/refreshtunnels').then(function(j){{
+    cfMsg('List direfresh ('+j.count+' tunnel)',true);setTimeout(function(){{location.reload();}},800);
+  }});
+}}
+function cfUseTunnel(id,name){{
+  cfApi('/api/cf/usetunnel',{{id:id,name:name}}).then(function(j){{
+    if(j.ok){{cfMsg('✓ Tunnel "'+name+'" dipilih. Lanjut ke step 4.',true);setTimeout(function(){{location.reload();}},1000);}}
+    else cfMsg('Error: '+(j.error||'?'),false);
+  }});
+}}
+function cfDelTunnel(id,name){{
+  if(!confirm('Hapus tunnel '+name+'?'))return;
+  cfApi('/api/cf/deltunnel',{{id:id}}).then(function(j){{
+    if(j.ok){{cfMsg('Tunnel dihapus',true);setTimeout(function(){{location.reload();}},800);}}
+    else cfMsg('Error: '+j.error,false);
+  }});
+}}
+
+var _zones=[];
+function cfLoadZones(){{
+  var tok=document.getElementById('cftoken').value.trim();
+  if(!tok){{cfMsg('Isi API token dulu',false);return;}}
+  cfMsg('Mengambil daftar domain...',null);
+  cfApi('/api/cf/zones',{{token:tok}}).then(function(j){{
+    if(!j.ok){{cfMsg('Error: '+j.error,false);return;}}
+    _zones=j.zones;
+    var sel=document.getElementById('zoneSel');
+    sel.innerHTML='<option value="">-- pilih domain --</option>';
+    j.zones.forEach(function(z){{
+      var o=document.createElement('option');
+      o.value=z.id; o.textContent=z.name+' ('+z.status+')'; o.dataset.name=z.name;
+      sel.appendChild(o);
+    }});
+    document.getElementById('zonebox').style.display='block';
+    cfMsg('✓ '+j.zones.length+' domain ditemukan',true);
+    // simpan token ke session (tidak ke server)
+    sessionStorage.setItem('cftoken',tok);
+  }});
+}}
+function _selectedZone(){{
+  var sel=document.getElementById('zoneSel');
+  var opt=sel.options[sel.selectedIndex];
+  return {{id:sel.value, name:opt?opt.dataset.name:''}};
+}}
+function cfGenYml(){{
+  var z=_selectedZone();
+  if(!z.id){{cfMsg('Pilih domain dulu',false);return;}}
+  var sub=document.getElementById('subdom').value.trim()||'socks';
+  var tok=document.getElementById('cftoken').value.trim();
+  cfMsg('Generate config.tunnel.yml...',null);
+  cfApi('/api/cf/genYml',{{zone_name:z.name,subdomain:sub,token:tok}}).then(function(j){{
+    if(j.ok){{cfMsg('✓ config.tunnel.yml dibuat ('+j.accounts+' akun)',true);setTimeout(function(){{location.reload();}},1000);}}
+    else cfMsg('Error: '+j.error,false);
+  }});
+}}
+function cfGenYmlManual(){{
+  var dom=document.getElementById('manDomain').value.trim();
+  if(!dom){{cfMsg('Isi domain dulu',false);return;}}
+  cfMsg('Generate config.tunnel.yml...',null);
+  cfApi('/api/cf/genYml',{{zone_name:dom,subdomain:'socks'}}).then(function(j){{
+    if(j.ok){{cfMsg('✓ config.tunnel.yml dibuat ('+j.accounts+' akun)',true);setTimeout(function(){{location.reload();}},1000);}}
+    else cfMsg('Error: '+j.error,false);
+  }});
+}}
+function cfCreateDNS(){{
+  var z=_selectedZone();
+  if(!z.id){{cfMsg('Pilih domain dulu',false);return;}}
+  var sub=document.getElementById('subdom').value.trim()||'socks';
+  var tok=document.getElementById('cftoken').value.trim();
+  if(!tok){{cfMsg('Isi API token dulu',false);return;}}
+  cfMsg('Membuat DNS wildcard...',null);
+  cfApi('/api/cf/createDNS',{{token:tok,zone_id:z.id,zone_name:z.name,subdomain:sub}}).then(function(j){{
+    if(j.ok){{cfMsg('✓ CNAME *.'+sub+'.'+z.name+' -> '+j.target+(j.note?' ('+j.note+')':''),true);}}
+    else cfMsg('Error DNS: '+j.error,false);
+  }});
+}}
+function cfTunnel(act){{
+  cfApi('/api/cf/tunnel',{{act:act}}).then(function(j){{
+    cfMsg(j.result||j.error||'ok', act==='stop'?null:true);
+    setTimeout(function(){{
+      cfGet('/api/cf/logstatus').then(function(s){{
+        var el=document.getElementById('cflog');if(el)el.textContent=s.log||'(kosong)';
+      }});
+    }},2000);
+  }});
+}}
+// restore token dari session
+(function(){{var t=sessionStorage.getItem('cftoken');if(t)document.getElementById('cftoken').value=t;}})();
+// poll log + badge tiap 5 detik
+setInterval(function(){{
+  cfGet('/api/cf/logstatus').then(function(s){{
+    var el=document.getElementById('cflog');if(el)el.textContent=s.log||'(kosong)';
+    var tb=document.querySelector('.stat:nth-child(3) .n');
+    if(tb)tb.innerHTML=s.running?'<span class="badge paid">RUNNING</span>':'<span class="badge expired">MATI</span>';
+  }}).catch(function(){{}});
+}},5000);
+</script>"""
+    tun_rows = "".join(
+        f'<tr><td><code>{t["id"]}</code></td><td>{html.escape(t["name"])}</td>'
+        f'<td><button class="sec" onclick="cfUseTunnel(\'{t["id"]}\',\'{html.escape(t["name"])}\')">Pakai</button> '
+        f'<button class="del" onclick="cfDelTunnel(\'{t["id"]}\',\'{html.escape(t["name"])}\')">Hapus</button></td></tr>'
+        for t in tunnels
+    ) or '<tr><td colspan="3" class="empty">Belum ada tunnel</td></tr>'
+
+    # status badge cloudflared binary
+    if dl["state"] == "done":
+        bin_badge = f'<span class="badge paid">ADA · {html.escape(dl["version"])}</span>'
+    elif dl["state"] == "downloading":
+        bin_badge = f'<span class="badge pending">Mengunduh {dl["progress"]}%...</span>'
+    elif dl["state"] == "error":
+        bin_badge = f'<span class="badge expired">Error: {html.escape(dl["error"])}</span>'
+    else:
+        bin_badge = '<span class="badge expired">BELUM ADA</span>'
+
+    login_st  = CF.login_status()
+    login_badge = '<span class="badge paid">Sudah login</span>' if login_st["done"] \
+                  else '<span class="badge expired">Belum login</span>'
+    tun_badge = ('<span class="badge paid">RUNNING</span>' if st["running"]
+                 else '<span class="badge expired">MATI</span>')
+    tun_yml   = os.path.join(CF.HERE, "config.tunnel.yml")
+    yml_ok    = os.path.exists(tun_yml)
+
+    dns_hint = ""
+    if SET.get("tunnel") and SET.get("tunnel_id"):
+        dom   = html.escape(SET["tunnel"])
+        tid   = html.escape(SET["tunnel_id"])
+        cname = f"{tid}.cfargotunnel.com"
+        dns_hint = f"""<div class="card"><h2>☁ DNS Wildcard</h2>
+<p style="font-size:13px;color:#344054">Buat CNAME berikut di Cloudflare DNS <b>sekali saja</b> — cover semua akun sekarang dan nanti:</p>
+<table><tr><th>Type</th><th>Name</th><th>Target</th><th>Proxy</th></tr>
+<tr><td>CNAME</td><td><code>*.socks.{dom}</code></td><td><code>{cname}</code></td><td><b style="color:#b42318">OFF (DNS only)</b></td></tr></table>
+<div class="btnrow" style="margin-top:10px">
+<a href="https://dash.cloudflare.com/?to=/:account/:zone/dns" target="_blank"><button class="sec">Buka CF DNS Dashboard ↗</button></a>
+</div>
+<div class="hint">Proxy harus OFF — raw TCP tunnel tidak bisa lewat CF HTTP proxy.</div></div>"""
+
+    log_html = html.escape(CF._tail_log(30)) or "(kosong)"
+
+    return f"""
+<div class="stats">
+<div class="stat"><div class="n" style="font-size:14px">{bin_badge}</div><div class="l">Binary cloudflared</div></div>
+<div class="stat"><div class="n" style="font-size:14px">{login_badge}</div><div class="l">Login CF</div></div>
+<div class="stat"><div class="n" style="font-size:14px">{tun_badge}</div><div class="l">Tunnel</div></div>
+</div>
+<div id="cfmsg" class="flash" style="display:none"></div>
+
+<div class="card"><h2>1 · Binary cloudflared</h2>
+<div class="hint">Platform: <code>{html.escape(pi["os"])}</code> / <code>{html.escape(pi["arch"])}</code> &nbsp;·&nbsp; Lokasi: <code>{html.escape(pi["bin"])}</code></div>
+{'<div class="hint" style="color:#186a3b;margin-top:6px">cloudflared sudah ada · versi: ' + html.escape(dl["version"]) + '</div>' if dl["state"]=="done" else
+ '<p style="font-size:13px;margin-top:8px">cloudflared belum ada. Download otomatis atau manual.</p>'}
+<div class="btnrow" style="margin-top:8px">
+{'<button class="sec" onclick="cfDownload()">Download Otomatis</button>' if dl["state"] not in ("done","downloading") else ""}
+{'<div class="hint">Sedang mengunduh... <span id="dlpct">' + str(dl["progress"]) + '</span>%</div>' if dl["state"]=="downloading" else ""}
+{('<a href="' + html.escape(dl_url) + '" target="_blank"><button class="sec">Download Manual (' + html.escape(dl_fname) + ') ↗</button></a>') if dl_url and dl["state"] not in ("done","downloading") else ""}
+</div>
+{('<div class="hint" style="color:#b42318">Error download: ' + html.escape(dl.get("error","")) + '<br>Coba download manual lalu letakkan file di: <code>' + html.escape(pi["bin"]) + '</code></div>') if dl["state"]=="error" else ""}
+{'<div class="hint">Setelah download manual, letakkan file di: <code>' + html.escape(pi["bin"]) + '</code> lalu refresh halaman ini.</div>' if dl["state"] not in ("done","downloading") and dl_fname else ""}
+</div>
+
+<div class="card"><h2>2 · Login Cloudflare</h2>
+<p style="font-size:13px;color:#344054">Login sekali — CF simpan sertifikat di <code>~/.cloudflared/cert.pem</code>.</p>
+<div class="btnrow">
+<button onclick="cfLogin()" {'disabled' if not CF.bin_ok() else ''}>Login ke Cloudflare</button>
+</div>
+<div id="cfloginurl" style="margin-top:12px;font-size:13px"></div>
+</div>
+
+<div class="card"><h2>3 · Buat atau Pilih Tunnel</h2>
+<label>Nama tunnel baru</label>
+<div class="btnrow">
+<input id="tname" placeholder="vlessbank" style="width:220px">
+<button onclick="cfCreate()" {'disabled' if not login_st["done"] else ''}>Buat Tunnel</button>
+</div>
+<div style="margin-top:14px">
+<table><tr><th>Tunnel ID</th><th>Nama</th><th></th></tr>{tun_rows}</table>
+<button class="sec" style="margin-top:8px" onclick="cfListTunnels()">Refresh List</button>
+</div></div>
+
+{dns_hint}
+
+<div class="card"><h2>5 · Jalankan Tunnel</h2>
+<p style="font-size:13px;color:#344054">
+config.tunnel.yml: {'<code>ada</code>' if yml_ok else '<b style="color:#b42318">belum ada — isi Pengaturan lalu klik Regenerate config di Dashboard</b>'}
+</p>
+<div class="btnrow">
+<button onclick="cfTunnel('start')" {'disabled' if not yml_ok else ''}>Start Tunnel</button>
+<button class="del" onclick="cfTunnel('stop')">Stop Tunnel</button>
+</div>
+<div style="margin-top:14px"><h2>Log cloudflared</h2><pre id="cflog">{log_html}</pre></div>
+</div>
+
+<script>
+function cfMsg(s,ok){{var m=document.getElementById('cfmsg');m.textContent=s;m.style.display='block';m.style.background=ok===false?'#fee4e2':ok===true?'#d4edda':'#fff3cd';m.style.color=ok===false?'#b42318':ok===true?'#186a3b':'#8a6d00';}}
+function cfApi(path,data){{return fetch(path,{{method:'POST',headers:authH(),body:data?new URLSearchParams(data).toString():''}}).then(function(r){{if(r.status===401){{sessionStorage.removeItem('vbauth');location.href='/login';throw 'unauth';}}return r.json();}});}}
+function cfGet(path){{return fetch(path,{{headers:{{'Authorization':sessionStorage.getItem('vbauth')||''}}}}).then(function(r){{return r.json();}});}}
+
+function cfDownload(){{
+  cfApi('/api/cf/download').then(function(j){{
+    cfMsg('Mengunduh...',null);
+    var iv=setInterval(function(){{
+      cfGet('/api/cf/dlstatus').then(function(s){{
+        if(s.state==='done'){{clearInterval(iv);cfMsg('Download selesai: '+s.version,true);location.reload();}}
+        else if(s.state==='error'){{clearInterval(iv);cfMsg('Error: '+s.error,false);}}
+        else{{var el=document.getElementById('dlpct');if(el)el.textContent=s.progress;cfMsg('Mengunduh '+s.progress+'%',null);}}
+      }});
+    }},1500);
+  }});
+}}
+
+function cfLogin(){{
+  cfMsg('Memulai login...',null);
+  cfApi('/api/cf/login').then(function(j){{
+    if(j.url){{
+      document.getElementById('cfloginurl').innerHTML='Klik link berikut untuk login di browser:<br><a href="'+j.url+'" target="_blank" style="color:#1a7f37;font-weight:600;word-break:break-all">'+j.url+'</a><br><small>Setelah authorize, halaman ini akan otomatis update.</small>';
+      cfMsg('Menunggu authorize di browser...',null);
+    }}
+    var iv=setInterval(function(){{
+      cfGet('/api/cf/loginstatus').then(function(s){{
+        if(s.done){{clearInterval(iv);cfMsg('Login berhasil!',true);setTimeout(function(){{location.reload();}},1500);}}
+        else if(s.url&&!document.getElementById('cfloginurl').innerHTML){{
+          document.getElementById('cfloginurl').innerHTML='<a href="'+s.url+'" target="_blank">'+s.url+'</a>';
+        }}
+      }});
+    }},2000);
+  }});
+}}
+
+function cfCreate(){{
+  var nm=document.getElementById('tname').value.trim();
+  if(!nm){{cfMsg('Isi nama tunnel dulu',false);return;}}
+  cfMsg('Membuat tunnel...',null);
+  cfApi('/api/cf/create',{{name:nm}}).then(function(j){{
+    if(j.ok){{cfMsg('Tunnel dibuat! ID: '+j.id,true);setTimeout(function(){{location.reload();}},1500);}}
+    else cfMsg('Error: '+j.error,false);
+  }});
+}}
+
+function cfUseTunnel(id,name){{
+  cfApi('/api/cf/usetunnel',{{id:id,name:name}}).then(function(j){{
+    if(j.ok)cfMsg('Tunnel dipilih: '+name+' ('+id+'). Regenerate config di Dashboard.',true);
+    else cfMsg('Error: '+(j.error||'?'),false);
+  }});
+}}
+
+function cfDelTunnel(id,name){{
+  if(!confirm('Hapus tunnel '+name+'?'))return;
+  cfApi('/api/cf/deltunnel',{{id:id}}).then(function(j){{
+    if(j.ok){{cfMsg('Tunnel dihapus',true);setTimeout(function(){{location.reload();}},1000);}}
+    else cfMsg('Error: '+j.error,false);
+  }});
+}}
+
+function cfTunnel(act){{
+  cfApi('/api/cf/tunnel',{{act:act}}).then(function(j){{
+    cfMsg(j.result||j.error||'ok', act==='stop'?null:true);
+    setTimeout(function(){{cfGet('/api/cf/logstatus').then(function(s){{
+      var el=document.getElementById('cflog');if(el)el.textContent=s.log;
+    }});}},2000);
+  }});
+}}
+
+// poll log setiap 5 detik kalau di halaman cf
+setInterval(function(){{
+  cfGet('/api/cf/logstatus').then(function(s){{
+    var el=document.getElementById('cflog');if(el)el.textContent=s.log||'(kosong)';
+    var tb=document.querySelector('.stat:nth-child(3) .n');
+    if(tb)tb.innerHTML=s.running?'<span class="badge paid">RUNNING</span>':'<span class="badge expired">MATI</span>';
+  }}).catch(function(){{}});
+}},5000);
+</script>"""
+
 def body_settings():
     s = SET
     bh = int(s.get("base_http") or 0) or BASE + 1000
@@ -632,7 +1120,16 @@ class H(BaseHTTPRequestHandler):
             return self._send(ip_test(parse_qs(u.query).get("port", [""])[0]))
         if u.path == "/ipall":
             return self._send(json.dumps(ip_all()))
-        # halaman admin: /admin, /admin/log, /admin/settings
+        # CF API endpoints (GET)
+        if u.path == "/api/cf/dlstatus":
+            return self._json(CF.dl_status())
+        if u.path == "/api/cf/loginstatus":
+            return self._json(CF.login_status())
+        if u.path == "/api/cf/logstatus":
+            return self._json({"log": CF._tail_log(40), "running": CF.tunnel_running()})
+        if u.path == "/api/cf/status":
+            return self._json(CF.tunnel_status())
+        # halaman admin: /admin, /admin/log, /admin/settings, /admin/cf
         tab = u.path[len("/admin"):].strip("/") or "dash"
         if u.path.startswith("/admin"):
             if tab == "log":
@@ -640,6 +1137,8 @@ class H(BaseHTTPRequestHandler):
                 return self._send(page("log", parse_qs(u.query).get("msg", [""])[0], b))
             if tab == "settings":
                 return self._send(page("set", parse_qs(u.query).get("msg", [""])[0], body_settings()))
+            if tab == "cf":
+                return self._send(page("cf", parse_qs(u.query).get("msg", [""])[0], body_cf()))
             return self._send(page("dash", parse_qs(u.query).get("msg", [""])[0]))
         # path lama tetap dialihkan biar bookmark lama gak mati
         if u.path in ("/log", "/settings"):
@@ -708,6 +1207,73 @@ class H(BaseHTTPRequestHandler):
             return self._json({"error": "act harus start/stop/restart"}, 400)
         if self.path == "/api/regen":
             return self._json({"result": gen()})
+        # CF API endpoints (POST)
+        if self.path == "/api/cf/download":
+            CF.download_binary()
+            return self._json({"ok": True})
+        if self.path == "/api/cf/login":
+            return self._json(CF.start_login())
+        if self.path == "/api/cf/create":
+            name = f.get("name", [""])[0].strip()
+            res = CF.create_tunnel(name)
+            if res.get("ok"):
+                # otomatis simpan ke settings
+                d = dict(SET)
+                d["tunnel_id"] = res["id"]
+                if not d.get("tunnel"):
+                    d["tunnel"] = ""  # user masih perlu isi domain
+                save_set(d)
+            return self._json(res)
+        if self.path == "/api/cf/usetunnel":
+            tid  = f.get("id",   [""])[0].strip()
+            name = f.get("name", [""])[0].strip()
+            if not tid:
+                return self._json({"ok": False, "error": "id kosong"}, 400)
+            d = dict(SET)
+            d["tunnel_id"] = tid
+            save_set(d)
+            return self._json({"ok": True, "id": tid, "name": name})
+        if self.path == "/api/cf/deltunnel":
+            tid = f.get("id", [""])[0].strip()
+            return self._json(CF.delete_tunnel(tid))
+        if self.path == "/api/cf/cancelLogin":
+            return self._json(CF.cancel_login())
+        if self.path == "/api/cf/refreshtunnels":
+            t = CF.list_tunnels()
+            return self._json({"ok": True, "count": len(t), "tunnels": t})
+        if self.path == "/api/cf/zones":
+            tok = f.get("token", [""])[0].strip()
+            if not tok:
+                return self._json({"ok": False, "error": "token kosong"}, 400)
+            return self._json(CF.cf_api_zones(tok))
+        if self.path == "/api/cf/genYml":
+            tid = SET.get("tunnel_id", "")
+            if not tid:
+                return self._json({"ok": False, "error": "Pilih tunnel dulu (step 3)"})
+            zone_name = f.get("zone_name", [""])[0].strip()
+            subdomain = f.get("subdomain", ["socks"])[0].strip() or "socks"
+            if not zone_name:
+                return self._json({"ok": False, "error": "domain kosong"})
+            # simpan domain ke settings juga
+            d = dict(SET); d["tunnel"] = zone_name; save_set(d)
+            return self._json(CF.generate_tunnel_yml(tid, zone_name, subdomain))
+        if self.path == "/api/cf/createDNS":
+            tok       = f.get("token",     [""])[0].strip()
+            zone_id   = f.get("zone_id",   [""])[0].strip()
+            zone_name = f.get("zone_name", [""])[0].strip()
+            subdomain = f.get("subdomain", ["socks"])[0].strip() or "socks"
+            tid = SET.get("tunnel_id", "")
+            if not all([tok, zone_id, zone_name, tid]):
+                return self._json({"ok": False, "error": "token/zone/tunnel_id tidak lengkap"})
+            return self._json(CF.cf_api_create_dns(tok, zone_id, zone_name, tid, subdomain))
+        if self.path == "/api/cf/tunnel":
+            act     = f.get("act", [""])[0]
+            tun_yml = os.path.join(CF.HERE, "config.tunnel.yml")
+            if act == "start":
+                return self._json({"result": CF.tunnel_start(tun_yml)})
+            if act == "stop":
+                return self._json({"result": CF.tunnel_stop()})
+            return self._json({"error": "act harus start/stop"}, 400)
         # form HTML lama (dari dashboard)
         if self.path == "/add":
             links = [l.strip() for l in f.get("links", [""])[0].splitlines()

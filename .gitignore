@@ -4,3 +4,7 @@ config.json
 webui.login
 webui.settings.json
 xray.log
+xray.exe
+cloudflared.exe
+*.zip
+__pycache__/

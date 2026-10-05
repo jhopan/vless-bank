@@ -53,7 +53,7 @@ case "$OS" in
 esac
 case "$ARCH" in
   x86_64|amd64) CF_ASSET=$( [ "$OS" = Linux ] && echo cloudflared-linux-amd64 || echo "$CF_ASSET"); XRAY_ZIP=$( [ "$OS" = Linux ] && echo Xray-linux-64.zip || echo Xray-windows-64.zip) ;;
-  aarch64|arm64) CF_ASSET=$( [ "$OS" = Linux ] && echo cloudflared-linux-arm64 || echo "$CF_ASSET"); XRAY_ZIP=$( [ "$OS" = Linux ] && echo Xray-linux-arm64-v8.zip || echo "$XRAY_ZIP") ;;
+  aarch64|arm64) CF_ASSET=$( [ "$OS" = Linux ] && echo cloudflared-linux-arm64 || echo "$CF_ASSET"); XRAY_ZIP=$( [ "$OS" = Linux ] && echo Xray-linux-arm64-v8a.zip || echo "$XRAY_ZIP") ;;
   *) die "Arch '$ARCH' belum didukung." ;;
 esac
 
